@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
-import tkinter as tk
+from .baseLineContext import BaseLineContext
+
 
 
 class LineStrategyInterface(ABC):
     @abstractmethod
-    def execute(self, a,b, canvas):
+    def __init__(self):
+        self.name = None
+    @abstractmethod
+    def execute(self, a, b, canvas):
         pass
 
     @abstractmethod
@@ -12,6 +16,8 @@ class LineStrategyInterface(ABC):
         pass
 
 class DDAStrategy(LineStrategyInterface):
+    def __init__(self):
+        self.name = 'ЦДА'
     def execute(self, a, b, canvas, debugger=None):
         x1, y1 = a
         x2, y2 = b
@@ -42,7 +48,10 @@ class DDAStrategy(LineStrategyInterface):
         size = 1  # Размер точки (1x1 пиксель)
         canvas.create_rectangle(x, y, x + size, y + size, outline=color, fill=color)
 
+
 class BresenhamStrategy(LineStrategyInterface):
+    def __init__(self):
+        self.name = 'Брезенхем'
     def execute(self, a, b, canvas, debugger=None):
         x1, y1 = a
         x2, y2 = b
@@ -83,13 +92,15 @@ class BresenhamStrategy(LineStrategyInterface):
         else:
             self.plot(canvas, int(x1), int(y1), "black")
 
-
     def plot(self, canvas, x, y, color="black"):
         """Рисует точку на холсте."""
         size = 1  # Размер точки (1x1 пиксель)
         canvas.create_rectangle(x, y, x + size, y + size, outline=color, fill=color)
 
+
 class WuStrategy(LineStrategyInterface):
+    def __init__(self):
+        self.name = 'Ву'
     def plot(self, canvas, x, y, intensity):
         """Рисует пиксель с заданной интенсивностью (серый цвет)."""
         grayscale = int(255 * (1 - intensity))  # Инверсия: 1.0 → черный, 0.0 → белый
@@ -97,7 +108,7 @@ class WuStrategy(LineStrategyInterface):
         canvas.create_rectangle(x, y, x + 1, y + 1, outline=color, fill=color)
 
     def execute(self, a, b, canvas, debugger=None):
-        """Алгоритм Ву с отладкой."""
+        """Алгоритм Ву с отладкой, без сглаживания для вертикальных и горизонтальных линий."""
         x1, y1 = a
         x2, y2 = b
 
@@ -107,8 +118,27 @@ class WuStrategy(LineStrategyInterface):
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
 
+        # Проверка на вертикальную линию (без сглаживания)
+        if dx == 0:
+            for y in range(y1, y2 + sy, sy):
+                if debugger:
+                    debugger.record_step(x1, y, 1.0)
+                else:
+                    self.plot(canvas, x1, y, 1.0)
+            return
+
+        # Проверка на горизонтальную линию (без сглаживания)
+        if dy == 0:
+            for x in range(x1, x2 + sx, sx):
+                if debugger:
+                    debugger.record_step(x, y1, 1.0)
+                else:
+                    self.plot(canvas, x, y1, 1.0)
+            return
+
+        # Для остальных линий используем сглаживание Ву
         if dx > dy:
-            gradient = dy / dx if dx != 0 else 1
+            gradient = dy / dx
             y = y1 + 0.5
             for x in range(x1, x2 + sx, sx):
                 y_int = int(y)
@@ -123,7 +153,7 @@ class WuStrategy(LineStrategyInterface):
 
                 y += gradient * sy
         else:
-            gradient = dx / dy if dy != 0 else 1
+            gradient = dx / dy
             x = x1 + 0.5
             for y in range(y1, y2 + sy, sy):
                 x_int = int(x)
@@ -143,12 +173,17 @@ class WuStrategy(LineStrategyInterface):
         else:
             self.plot(canvas, x2, y2, 1.0)
 
-class LineContext:
-    def __init__(self):
-        self.__strategy:LineStrategyInterface = None
 
-    def set_strategy(self, strategy:LineStrategyInterface):
+
+class LineContext(BaseLineContext):
+    def __init__(self):
+        self.__strategy: LineStrategyInterface = None
+
+    def set_strategy(self, strategy: LineStrategyInterface):
         self.__strategy = strategy
 
+    def get_strategy(self):
+        return self.__strategy
+
     def execute_strategy(self, a, b, canvas, debugger=None):
-        return self.__strategy.execute(a,b, canvas, debugger )
+        return self.__strategy.execute(a, b, canvas, debugger)
