@@ -263,9 +263,26 @@ $d_2 = b^2 (x - 0.5)^2 - a^2 (y + 1)^2 - a^2 b^2$
 
 
 ## Реализация
-Функция получения данных от клиента через WebSocket, выбор соответствующего алгоритма.
+Функция выбора алгоритма для запуска:
+```Python
+    def capture_second_order_points(self, event):
+        """Фиксирует точки для линий второго порядка."""
+        x, y = self.canvas_view.get_coordinates(event)
+        self.click_points.append([x, y])
+        self.click_count += 1
 
-Алгоритм построения параболы.
+        strategy = self.active_context.get_strategy()
+        if not strategy:
+            print("Ошибка: не выбрана стратегия рисования второго порядка.")
+            return
+
+        if strategy.name == "Окружность" and self.click_count == 2:
+            # Окружность (2 клика)
+            self.draw_second_order_shape(two_points=True)
+        elif strategy.name in ["Эллипс", "Гипербола", "Парабола"] and self.click_count == 3:
+            # Эллипс, гипербола, парабола (3 клика)
+            self.draw_second_order_shape(two_points=False)
+```
 
 ## Вывод
 В ходе работы был создан простой графический редактор, позволяющий строить и визуализировать различные кривые, включая окружности, эллипсы, гиперболы и параболы.
