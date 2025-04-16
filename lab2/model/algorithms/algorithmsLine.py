@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from .baseLineContext import BaseLineContext
+import time # Add time for unique tags
 
 
 
@@ -19,42 +20,54 @@ class DDAStrategy(LineStrategyInterface):
     def __init__(self):
         self.name = 'ЦДА'
     def execute(self, a, b, canvas, debugger=None):
+        shape_tag = f"line_{time.time_ns()}"
         x1, y1 = a
         x2, y2 = b
 
         dx = x2 - x1
         dy = y2 - y1
         length = max(abs(dx), abs(dy))
+        if length == 0: return shape_tag # Handle zero-length line
 
-        dx /= length
-        dy /= length
+        x_inc = dx / length
+        y_inc = dy / length
 
         x = x1 + 0.5 * (1 if dx > 0 else -1 if dx < 0 else 0)
         y = y1 + 0.5 * (1 if dy > 0 else -1 if dy < 0 else 0)
 
-        if debugger:
-            debugger.record_step(int(x), int(y))
+        # Use a helper to plot/record
+        self._plot_or_record(canvas, debugger, int(x), int(y), 1.0, shape_tag)
+        last_plot_x, last_plot_y = int(x), int(y)
 
         for _ in range(int(length)):
-            x += dx
-            y += dy
-            if debugger:
-                debugger.record_step(int(x), int(y))
-            else:
-                self.plot(canvas, int(x), int(y))
+            x += x_inc
+            y += y_inc
+            plot_x, plot_y = int(x), int(y)
+            if (plot_x, plot_y) != (last_plot_x, last_plot_y):
+                 self._plot_or_record(canvas, debugger, plot_x, plot_y, 1.0, shape_tag)
+                 last_plot_x, last_plot_y = plot_x, plot_y
+        return shape_tag
 
+    def _plot_or_record(self, canvas, debugger, x, y, intensity, tag):
+        if debugger:
+            debugger.record_step(x, y, intensity, "Линия") # Assuming record_step takes intensity and mode
+        elif canvas:
+             # Intensity handling for DDA? Defaulting to black
+             color = "black"
+             canvas.create_rectangle(x, y, x + 1, y + 1, outline=color, fill=color, tags=tag)
+
+    # Keep plot for interface, though execute might not call it directly
     def plot(self, canvas, x, y, color="black"):
-
-        size = 1  # Размер точки (1x1 пиксель)
-        canvas.create_rectangle(x, y, x + size, y + size, outline=color, fill=color)
+        canvas.create_rectangle(int(x), int(y), int(x) + 1, int(y) + 1, outline=color, fill=color)
 
 
 class BresenhamStrategy(LineStrategyInterface):
     def __init__(self):
         self.name = 'Брезенхем'
     def execute(self, a, b, canvas, debugger=None):
-        x1, y1 = a
-        x2, y2 = b
+        shape_tag = f"line_{time.time_ns()}"
+        x1, y1 = map(int, a)
+        x2, y2 = map(int, b)
 
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
@@ -62,116 +75,135 @@ class BresenhamStrategy(LineStrategyInterface):
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
 
+        # Plot the first point
+        self._plot_point(canvas, debugger, x1, y1, "black", shape_tag)
+
         if dx > dy:
             e = 2 * dy - dx
             while x1 != x2:
-                if debugger:
-                    debugger.record_step(int(x1), int(y1))
-                else:
-                    self.plot(canvas, int(x1), int(y1), "black")
                 if e >= 0:
                     y1 += sy
                     e -= 2 * dx
                 x1 += sx
                 e += 2 * dy
+                self._plot_point(canvas, debugger, x1, y1, "black", shape_tag)
         else:
             e = 2 * dx - dy
             while y1 != y2:
-                if debugger:
-                    debugger.record_step(int(x1), int(y1))
-                else:
-                    self.plot(canvas, int(x1), int(y1), "black")
                 if e >= 0:
                     x1 += sx
                     e -= 2 * dy
                 y1 += sy
                 e += 2 * dx
+                self._plot_point(canvas, debugger, x1, y1, "black", shape_tag)
 
+        return shape_tag
+
+    def _plot_point(self, canvas, debugger, x, y, color, tag):
         if debugger:
-            debugger.record_step(int(x1), int(y1))
-        else:
-            self.plot(canvas, int(x1), int(y1), "black")
+            debugger.record_step(x, y, 1.0, "Линия") # Assuming intensity 1.0
+        elif canvas:
+            canvas.create_rectangle(x, y, x + 1, y + 1, outline=color, fill=color, tags=tag)
 
+    # Keep plot for interface
     def plot(self, canvas, x, y, color="black"):
-        """Рисует точку на холсте."""
-        size = 1  # Размер точки (1x1 пиксель)
-        canvas.create_rectangle(x, y, x + size, y + size, outline=color, fill=color)
+        canvas.create_rectangle(int(x), int(y), int(x) + 1, int(y) + 1, outline=color, fill=color)
 
 
 class WuStrategy(LineStrategyInterface):
     def __init__(self):
         self.name = 'Ву'
-    def plot(self, canvas, x, y, intensity):
-        """Рисует пиксель с заданной интенсивностью (серый цвет)."""
-        grayscale = int(255 * (1 - intensity))  # Инверсия: 1.0 → черный, 0.0 → белый
-        color = f"#{grayscale:02x}{grayscale:02x}{grayscale:02x}"
-        canvas.create_rectangle(x, y, x + 1, y + 1, outline=color, fill=color)
+    def plot(self, canvas, x, y, intensity=1.0, color=None):
+        """Реализация абстрактного метода plot (игнорируем color, используем intensity)."""
+        # This plot method might not be directly called if _plot_wu is used internally,
+        # but it needs to exist to satisfy the interface.
+        self._plot_wu(canvas, None, int(x), int(y), intensity, tag=None) # Plot single point without tag
 
     def execute(self, a, b, canvas, debugger=None):
-        """Алгоритм Ву с отладкой, без сглаживания для вертикальных и горизонтальных линий."""
+        shape_tag = f"line_{time.time_ns()}"
         x1, y1 = a
         x2, y2 = b
 
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
+        dx = x2 - x1
+        dy = y2 - y1
 
-        sx = 1 if x1 < x2 else -1
-        sy = 1 if y1 < y2 else -1
-
-        # Проверка на вертикальную линию (без сглаживания)
+        # Handle vertical/horizontal/single point cases without main loop
+        if dx == 0 and dy == 0:
+            self._plot_wu(canvas, debugger, int(x1), int(y1), 1.0, shape_tag)
+            return shape_tag
         if dx == 0:
-            for y in range(y1, y2 + sy, sy):
-                if debugger:
-                    debugger.record_step(x1, y, 1.0)
-                else:
-                    self.plot(canvas, x1, y, 1.0)
-            return
-
-        # Проверка на горизонтальную линию (без сглаживания)
+            for y in range(min(int(y1), int(y2)), max(int(y1), int(y2)) + 1):
+                 self._plot_wu(canvas, debugger, int(x1), y, 1.0, shape_tag)
+            return shape_tag
         if dy == 0:
-            for x in range(x1, x2 + sx, sx):
-                if debugger:
-                    debugger.record_step(x, y1, 1.0)
-                else:
-                    self.plot(canvas, x, y1, 1.0)
-            return
+            for x in range(min(int(x1), int(x2)), max(int(x1), int(x2)) + 1):
+                 self._plot_wu(canvas, debugger, x, int(y1), 1.0, shape_tag)
+            return shape_tag
 
-        # Для остальных линий используем сглаживание Ву
-        if dx > dy:
-            gradient = dy / dx
-            y = y1 + 0.5
-            for x in range(x1, x2 + sx, sx):
-                y_int = int(y)
-                frac = y - y_int  # Дробная часть
+        steep = abs(dy) > abs(dx)
+        if steep:
+            x1, y1 = y1, x1
+            x2, y2 = y2, x2
+            dx, dy = dy, dx
 
-                if debugger:
-                    debugger.record_step(x, y_int, 1 - frac)
-                    debugger.record_step(x, y_int + sy, frac)
-                else:
-                    self.plot(canvas, x, y_int, 1 - frac)
-                    self.plot(canvas, x, y_int + sy, frac)
+        if x1 > x2:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
+            dx = abs(dx) # dx should be positive now
+            dy = y2 - y1 # recalculate dy with correct sign
 
-                y += gradient * sy
+        gradient = dy / dx
+
+        # handle first endpoint
+        xend = round(x1)
+        yend = y1 + gradient * (xend - x1)
+        xgap = 1 - ((x1 + 0.5) % 1) # fractional part from 0.5
+        xpxl1 = int(xend)
+        ypxl1 = int(yend)
+        if steep:
+            self._plot_wu(canvas, debugger, ypxl1,     xpxl1, (1 - (yend % 1)) * xgap, shape_tag)
+            self._plot_wu(canvas, debugger, ypxl1 + 1, xpxl1,    (yend % 1)  * xgap, shape_tag)
         else:
-            gradient = dx / dy
-            x = x1 + 0.5
-            for y in range(y1, y2 + sy, sy):
-                x_int = int(x)
-                frac = x - x_int  # Дробная часть
+            self._plot_wu(canvas, debugger, xpxl1, ypxl1,     (1 - (yend % 1)) * xgap, shape_tag)
+            self._plot_wu(canvas, debugger, xpxl1, ypxl1 + 1,    (yend % 1)  * xgap, shape_tag)
+        intery = yend + gradient # first y-intersection for the main loop
 
-                if debugger:
-                    debugger.record_step(x_int, y, 1 - frac)
-                    debugger.record_step(x_int + sx, y, frac)
-                else:
-                    self.plot(canvas, x_int, y, 1 - frac)
-                    self.plot(canvas, x_int + sx, y, frac)
+        # handle second endpoint
+        xend = round(x2)
+        yend = y2 + gradient * (xend - x2)
+        xgap = (x2 + 0.5) % 1
+        xpxl2 = int(xend)
+        ypxl2 = int(yend)
+        if steep:
+            self._plot_wu(canvas, debugger, ypxl2,     xpxl2, (1 - (yend % 1)) * xgap, shape_tag)
+            self._plot_wu(canvas, debugger, ypxl2 + 1, xpxl2,    (yend % 1)  * xgap, shape_tag)
+        else:
+            self._plot_wu(canvas, debugger, xpxl2, ypxl2,     (1 - (yend % 1)) * xgap, shape_tag)
+            self._plot_wu(canvas, debugger, xpxl2, ypxl2 + 1,    (yend % 1)  * xgap, shape_tag)
 
-                x += gradient * sx
+        # main loop
+        if steep:
+            for x in range(xpxl1 + 1, xpxl2):
+                self._plot_wu(canvas, debugger, int(intery),     x, 1 - (intery % 1), shape_tag)
+                self._plot_wu(canvas, debugger, int(intery) + 1, x,    (intery % 1), shape_tag)
+                intery += gradient
+        else:
+            for x in range(xpxl1 + 1, xpxl2):
+                self._plot_wu(canvas, debugger, x, int(intery),     1 - (intery % 1), shape_tag)
+                self._plot_wu(canvas, debugger, x, int(intery) + 1,    (intery % 1), shape_tag)
+                intery += gradient
 
+        return shape_tag
+
+    def _plot_wu(self, canvas, debugger, x, y, intensity, tag):
+        if intensity < 0: intensity = 0
+        if intensity > 1: intensity = 1
         if debugger:
-            debugger.record_step(x2, y2, 1.0)  # Последний пиксель
-        else:
-            self.plot(canvas, x2, y2, 1.0)
+            debugger.record_step(x, y, intensity, "Линия") # Pass intensity
+        elif canvas:
+            grayscale = int(255 * (1 - intensity))
+            color = f"#{grayscale:02x}{grayscale:02x}{grayscale:02x}"
+            canvas.create_rectangle(x, y, x + 1, y + 1, outline=color, fill=color, tags=tag)
 
 
 
@@ -186,4 +218,7 @@ class LineContext(BaseLineContext):
         return self.__strategy
 
     def execute_strategy(self, a, b, canvas, debugger=None):
-        return self.__strategy.execute(a, b, canvas, debugger)
+        if self.__strategy:
+            # Pass debugger if available, strategy should handle it
+            return self.__strategy.execute(a, b, canvas, debugger=debugger)
+        return None

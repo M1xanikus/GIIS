@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-from Tkinter.model.algorithms.algorithmsLine import DDAStrategy, BresenhamStrategy, WuStrategy
-from Tkinter.model.algorithms.algorithmsSecondOrderLine import (
+from model.algorithms.algorithmsLine import DDAStrategy, BresenhamStrategy, WuStrategy
+from model.algorithms.algorithmsSecondOrderLine import (
     BresenhamEllipseStrategy, BresenhamCircleStrategy,
     BresenhamParabolaStrategy, BresenhamHyperbolaStrategy
 )
@@ -132,8 +132,11 @@ class Debugger:
         strategy_class = {"ЦДА": DDAStrategy, "Брезенхем": BresenhamStrategy, "Ву": WuStrategy}.get(self.line_algorithm)
         if strategy_class:
             strategy = strategy_class()
-            strategy.execute([x1, y1], [x2, y2], self.line_canvas, self)
-            self.line_step_button.config(state=tk.NORMAL)
+            strategy.execute([x1, y1], [x2, y2], canvas=None, debugger=self)
+            if self.line_steps:
+                self.line_step_button.config(state=tk.NORMAL)
+            else:
+                self.line_step_button.config(state=tk.DISABLED)
 
     def execute_second_order_algorithm(self):
         self.clear_canvas("Второй порядок")
@@ -141,28 +144,29 @@ class Debugger:
         self.second_step_index = 0
 
         try:
-            if self.second_algorithm == "Окружность":
-                point1 = (int(self.second_inputs["X1"].get()), int(self.second_inputs["Y1"].get()))
-                point2 = (int(self.second_inputs["X2"].get()), int(self.second_inputs["Y2"].get()))
-                point3 = None  # Третья точка передается как None
-            else:
-                point1 = (int(self.second_inputs["X1"].get()), int(self.second_inputs["Y1"].get()))
-                point2 = (int(self.second_inputs["X2"].get()), int(self.second_inputs["Y2"].get()))
+            point1 = (int(self.second_inputs["X1"].get()), int(self.second_inputs["Y1"].get()))
+            point2 = (int(self.second_inputs["X2"].get()), int(self.second_inputs["Y2"].get()))
+            point3 = None
+            if self.second_algorithm != "Окружность":
                 point3 = (int(self.second_inputs["X3"].get()), int(self.second_inputs["Y3"].get()))
         except ValueError:
             messagebox.showerror("Ошибка", "Введите корректные числовые значения!")
             return
 
-        strategy = {
+        strategy_class = {
             "Окружность": BresenhamCircleStrategy,
             "Эллипс": BresenhamEllipseStrategy,
             "Парабола": BresenhamParabolaStrategy,
             "Гипербола": BresenhamHyperbolaStrategy
-        }.get(self.second_algorithm, None)
+        }.get(self.second_algorithm)
 
-        if strategy:
-            strategy().execute(point1, point2, point3, self.second_canvas, self)
-            self.second_step_button.config(state=tk.NORMAL)
+        if strategy_class:
+            strategy = strategy_class()
+            strategy.execute(point1, point2, point3, canvas=None, debugger=self)
+            if self.second_steps:
+                self.second_step_button.config(state=tk.NORMAL)
+            else:
+                self.second_step_button.config(state=tk.DISABLED)
 
     def draw_grid(self, canvas):
         for x in range(0, self.canvas_size, self.cell_size):
@@ -175,31 +179,53 @@ class Debugger:
         canvas.delete("all")
         self.draw_grid(canvas)
 
-    def record_step(self, x, y, intensity=1, mode="Линия"):
-        steps = self.line_steps if mode == "Линия" else self.second_steps
-        steps.append((x, y, intensity))
+    def record_step(self, x, y, intensity=1.0, mode="Линия"):
+        if mode == "Линия":
+            self.line_steps.append((x, y, intensity))
+        elif mode == "Второй порядок":
+            self.second_steps.append((x, y, intensity))
+        else:
+            print(f"[Debugger] Неизвестный режим для записи шага: {mode}")
 
     def step_forward(self, mode="Линия"):
-        steps = self.line_steps if mode == "Линия" else self.second_steps
-        step_index = self.line_step_index if mode == "Линия" else self.second_step_index
-        canvas = self.line_canvas if mode == "Линия" else self.second_canvas
+        if mode == "Линия":
+            steps = self.line_steps
+            step_index = self.line_step_index
+            canvas = self.line_canvas
+            button = self.line_step_button
+        else: # Второй порядок
+            steps = self.second_steps
+            step_index = self.second_step_index
+            canvas = self.second_canvas
+            button = self.second_step_button
 
-        if step_index < len(steps):
+        if 0 <= step_index < len(steps):
             x, y, intensity = steps[step_index]
+            # Basic check: Map algorithm coordinates to debugger grid coordinates
+            # Assuming algorithm coordinates are relative to 0,0
+            # And debugger grid cells are 0 to canvas_size/cell_size
+            grid_x = x * self.cell_size
+            grid_y = y * self.cell_size
+
             grayscale = int(255 * (1 - intensity))
             color = f"#{grayscale:02x}{grayscale:02x}{grayscale:02x}"
 
-            canvas.create_rectangle(x * self.cell_size, y * self.cell_size,
-                                    (x + 1) * self.cell_size, (y + 1) * self.cell_size,
-                                    outline=color, fill=color)
+            # Draw on the debugger canvas using grid coordinates
+            canvas.create_rectangle(grid_x, grid_y,
+                                    grid_x + self.cell_size, grid_y + self.cell_size,
+                                    outline=color, fill=color, tags="step") # Add tag
 
+            # Increment index
             if mode == "Линия":
                 self.line_step_index += 1
+                step_index = self.line_step_index # Update for button check
             else:
                 self.second_step_index += 1
+                step_index = self.second_step_index # Update for button check
 
-            if step_index >= len(steps) - 1:
-                if mode == "Линия":
-                    self.line_step_button.config(state=tk.DISABLED)
-                else:
-                    self.second_step_button.config(state=tk.DISABLED)
+            # Disable button if last step was drawn
+            if step_index >= len(steps):
+                button.config(state=tk.DISABLED)
+        else:
+            print("[Debugger] Нет больше шагов для отображения или индекс вне диапазона.")
+            button.config(state=tk.DISABLED)
