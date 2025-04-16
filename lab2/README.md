@@ -308,7 +308,8 @@ B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3, где t ∈ [0,1]
 B-сплайн строится с использованием базисных функций B-сплайна. Кривая не обязательно проходит через контрольные точки, но обеспечивает локальный контроль формы.
 
 ## Интерфейс
-![image](https://github.com/user-attachments/assets/...)
+![image](https://github.com/user-attachments/assets/55b6a10f-6da4-42d7-9138-7ec546627be7)
+
 
 ## Реализация
 ```Python
@@ -373,7 +374,8 @@ class BSplineStrategy(CurveStrategy):
 3. Строим выпуклую оболочку, последовательно добавляя точки в стек и удаляя точки, которые нарушают выпуклость
 
 ## Интерфейс
-![image](https://github.com/user-attachments/assets/...)
+![image](https://github.com/user-attachments/assets/840232a4-97d2-4afb-b792-d18262b26317)
+
 
 ## Реализация
 ```Python
