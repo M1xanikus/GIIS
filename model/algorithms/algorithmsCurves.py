@@ -25,13 +25,11 @@ class HermiteCurve(CurveStrategy):
             x = np.dot(np.dot(T, M), [points[0][0], points[3][0], points[1][0], points[2][0]])
             y = np.dot(np.dot(T, M), [points[0][1], points[3][1], points[1][1], points[2][1]])
 
-            # Draw line segments instead of ovals for a single object ID (or use tags)
+           
             if last_x is not None:
                 canvas.create_line(last_x, last_y, x, y, fill='black', tags=(shape_tag, "curve_segment"))
             last_x, last_y = x, y
-            # Or keep ovals with tags:
-            # canvas.create_oval(x-1, y-1, x+1, y+1, fill='black', outline='black', tags=(shape_tag, "curve_point"))
-
+           
         return shape_tag # Return the tag
 
 class BezierCurve(CurveStrategy):
@@ -55,9 +53,7 @@ class BezierCurve(CurveStrategy):
             if last_x is not None:
                 canvas.create_line(last_x, last_y, x, y, fill='black', tags=(shape_tag, "curve_segment"))
             last_x, last_y = x, y
-            # Or keep ovals with tags:
-            # canvas.create_oval(x-1, y-1, x+1, y+1, fill='black', outline='black', tags=(shape_tag, "curve_point"))
-
+        
         return shape_tag # Return the tag
 
 class BSplineCurve(CurveStrategy):

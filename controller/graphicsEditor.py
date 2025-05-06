@@ -1,6 +1,9 @@
 import tkinter as tk
-from tkinter import ttk # Add ttk
+from tkinter import ttk, colorchooser # Добавляем colorchooser
 from model.debugger.lineDebugger import Debugger
+# --- Импорт отладчика V/D ---
+from model.debugger.voronoiDelaunayDebugger import VoronoiDelaunayDebugger
+# ---------------------------
 from model.algorithms.algorithmsLine import LineContext, LineStrategyInterface
 from model.algorithms.algorithmsSecondOrderLine import SecondOrderLineContext, SecondOrderLineStrategyInterface
 from model.algorithms.algorithmsCurves import CurveContext, CurveStrategy
@@ -20,12 +23,26 @@ import model.polygon_analysis as pa
 # --- Импортируем классы заливки ---
 from model.algorithms.algorithmsFill import FillContext, FillMenuClass
 # --------------------------------
+# --- Импорт Вороной/Делоне ---
+from model.algorithms.algorithmsVoronoiDelaunay import VoronoiDelaunayContext, VoronoiDelaunayMenuClass
+# ----------------------------
+# --- Импорт Pillow для заливки ---
+try:
+    from PIL import Image, ImageDraw, ImageTk
+except ImportError:
+    print("ОШИБКА: Для работы алгоритмов заливки Flood Fill и Scanline Seed Fill")
+    print("        необходима библиотека Pillow. Установите ее: pip install Pillow")
+    Image = None
+    ImageDraw = None
+    ImageTk = None
+# --------------------------------
 
 class GraphicsEditor:
     HANDLE_SIZE = 3 # Half-size for drawing handles (e.g., 3x3 pixels around the point)
     SNAP_RADIUS = 5 # Radius for snapping/selecting handles
     DOCKING_RADIUS = 10 # Radius for curve endpoint docking
     TEMP_POINT_RADIUS = 2 # Radius for temporary polygon points
+    TEMP_VD_POINT_RADIUS = 3 # Radius for Voronoi/Delaunay input points
 
     def __init__(self, root):
         self.root = root
@@ -37,12 +54,17 @@ class GraphicsEditor:
         self.second_order_context = SecondOrderLineContext()
         self.curve_context = CurveContext()
         self.polygon_context = PolygonContext() # <-- Инициализация контекста полигонов
-        self.active_context = None # Текущий активный контекст (рисования или None)
+        self.voronoi_delaunay_context = VoronoiDelaunayContext() # --- Инициализация контекста Вороной/Делоне ---
+        self.active_context = None # Текущий активный контекст (рисования или None) # Moved after all contexts are initialized
         self.last_active_draw_context = None # Запоминаем последний инструмент рисования
         self.fill_context = FillContext() # <-- Инициализация контекста заливки
         # -----------------------------------------
 
-        self.debugger = None
+        self.debugger = None # For line debugging
+        # --- V/D Debugger State ---
+        self.vd_debugger = None
+        self.vd_debug_mode_active = tk.BooleanVar(value=False)
+        # -------------------------
         self.debug_mode_active = tk.BooleanVar(value=False) # General debug flag for transforms
 
         self.main_frame = tk.Frame(root)
@@ -57,6 +79,11 @@ class GraphicsEditor:
         self.debug_menu.add_checkbutton(label="Отладка Трансформаций (Консоль)",
                                        variable=self.debug_mode_active,
                                        command=self.toggle_transform_debug)
+        # --- Add V/D Debug Toggle to Menu ---
+        self.debug_menu.add_checkbutton(label="Отладка Вороной/Делоне (Пошагово)",
+                                       variable=self.vd_debug_mode_active,
+                                       command=self.toggle_vd_debug)
+        # ------------------------------------
         self.menu.add_cascade(label="Отладка", menu=self.debug_menu)
         # ------------------
 
@@ -83,6 +110,11 @@ class GraphicsEditor:
         self.selected_item_index = None # Index in self.drawn_items
         self.selected_handle_index = None # Index of the handle within the item's points/handles
         self.drag_start_pos = None # Store initial position for dragging
+        # --- State for Voronoi/Delaunay ---
+        self.vd_input_points = [] # Points specifically for V/D calculation
+        self.vd_temp_point_ids = [] # Canvas IDs of temporary points shown during input
+        self.vd_result_ids = [] # Canvas IDs of the drawn V/D diagram elements
+        # ---------------------------------
 
         # --- Состояние для анализа полигонов ---
         self.analysis_mode = None # None, "check_convex", "show_normals", "select_poly_for_intersect", "draw_intersect_segment", "select_poly_for_point_test", "pick_point_for_test"
@@ -93,7 +125,7 @@ class GraphicsEditor:
         self.fill_mode = None # None, "select_polygon", "pick_seed"
         self.selected_polygon_for_fill_idx = None
         self.fill_color = "blue" # Цвет заливки по умолчанию
-        self.fill_feedback_items = [] # ID элементов заливки
+        self.current_fill_photo_image = None # Ссылка на PhotoImage для PIL заливок
         # ------------------------------------
 
         # --- 3D Mode State ---
@@ -116,6 +148,7 @@ class GraphicsEditor:
         self.edit_button = None
         self.mode_3d_button = None
         self.build_hull_button = None
+        self.build_vd_button = None # Button for Voronoi/Delaunay
 
         self.init_toolbar()
         # Set default tool (e.g., line tool)
@@ -164,6 +197,13 @@ class GraphicsEditor:
         polygon_button.config(command=polygon_menu.show_algorithm_menu)
         # --------------------------
 
+        # --- Voronoi/Delaunay ---
+        vd_button = tk.Button(self.toolbar, text="Диагр./Трианг.") # Short name
+        vd_button.pack(pady=5, fill=tk.X)
+        vd_menu = VoronoiDelaunayMenuClass(self.root, vd_button, self.voronoi_delaunay_context, self.activate_voronoi_delaunay_tool)
+        vd_button.config(command=vd_menu.show_algorithm_menu)
+        # ------------------------
+
         # --- Заливка полигонов ---
         fill_button = tk.Button(self.toolbar, text="Заливка полигона")
         fill_button.pack(pady=5, fill=tk.X)
@@ -177,6 +217,11 @@ class GraphicsEditor:
         # Не пакуем ее сразу, она будет упакована/распакована в activate_polygon_tool
         # -------------------------------------------------------
 
+        # --- Кнопка "Построить" для Вороной/Делоне (изначально скрыта) ---
+        self.build_vd_button = tk.Button(self.toolbar, text="Построить", command=self.build_voronoi_delaunay, state=tk.DISABLED)
+        # Не пакуем ее сразу, она будет упакована/распакована в activate_voronoi_delaunay_tool
+        # ---------------------------------------------------------
+
         # --- Placeholder for 2D Transform Controls (initially hidden) ---
         self.transform_2d_frame = ttk.Frame(self.toolbar)
         # Don't pack it yet, pack when an item is selected
@@ -186,6 +231,11 @@ class GraphicsEditor:
         # Очистка холста (внизу)
         self.clear_button = tk.Button(self.toolbar, text="Очистить 2D", command=self.clear_area)
         self.clear_button.pack(pady=10, side=tk.BOTTOM, fill=tk.X)
+
+        # --- Кнопка выбора цвета заливки ---
+        choose_fill_color_button = tk.Button(self.toolbar, text="Цвет заливки", command=self.choose_fill_color)
+        choose_fill_color_button.pack(pady=5, fill=tk.X)
+        # ----------------------------------
 
     def create_2d_transform_controls(self, parent_frame):
         """Создает виджеты для управления 2D трансформациями."""
@@ -234,26 +284,47 @@ class GraphicsEditor:
             self.transform_2d_frame.pack_forget()
 
     def clear_area(self):
-        """Очищает Canvas, сбрасывает состояние и удаляет сохраненные элементы."""
+        """Очищает область рисования, включая все элементы и состояния."""
+        print("Clearing canvas...")
         self.canvas_view.clear()
+        self.drawn_items = []
+        self.click_points = []
         self.click_count = 0
-        self.click_points = [] # Сбрасываем точки для всех режимов
-        self.drawn_items = [] # Clear stored items
         self.selected_item_index = None
         self.selected_handle_index = None
-        self.cancel_analysis_mode() # Сбрасываем режим анализа
-        if self.build_hull_button:
-            self.build_hull_button.pack_forget() # Скрываем кнопку построения
-            self.build_hull_button.config(state=tk.DISABLED)
-        self.canvas_view.canvas.delete("temp_polygon_point") # Удаляем временные точки полигона
-        self.clear_analysis_feedback() # Очищаем элементы анализа
-        self.cancel_fill_mode() # Сбрасываем режим заливки
-        self.clear_fill_feedback() # Очищаем элементы заливки
-        self.update_analysis_menu_state() # Обновляем состояние меню анализа
-        # Reactivate default tool or last used? Default to line for now
-        self.activate_line_tool()
-        if self.debugger:
-            pass # Placeholder for debugger clear
+        self.hide_2d_transform_controls() # Hide transform controls on clear
+        self.cancel_analysis_mode() # Reset analysis state
+        self.cancel_fill_mode() # Reset fill state
+        # --- Clear Voronoi/Delaunay state ---
+        self.clear_vd_input_points()
+        self.clear_vd_results()
+        self.vd_input_points = []
+        # ------------------------------------
+        # Reset active context state if needed (e.g., polygon tool)
+        if self.active_context == self.polygon_context:
+            if self.build_hull_button:
+                self.build_hull_button.config(state=tk.DISABLED)
+        elif self.active_context == self.voronoi_delaunay_context:
+             if self.build_vd_button:
+                 self.build_vd_button.config(state=tk.DISABLED)
+
+        # Optionally reactivate the last drawing tool or a default one
+        if self.last_active_draw_context:
+            if self.last_active_draw_context == self.line_context:
+                self.activate_line_tool()
+            elif self.last_active_draw_context == self.second_order_context:
+                self.activate_second_order_tool()
+            elif self.last_active_draw_context == self.curve_context:
+                self.activate_curve_tool()
+            elif self.last_active_draw_context == self.polygon_context:
+                 self.activate_polygon_tool()
+            elif self.last_active_draw_context == self.voronoi_delaunay_context:
+                 self.activate_voronoi_delaunay_tool()
+            # Add other contexts if necessary
+        else:
+            self.activate_line_tool() # Default fallback
+
+        print("Canvas cleared.")
 
     def activate_line_tool(self):
         """Активирует инструмент рисования отрезков."""
@@ -305,24 +376,39 @@ class GraphicsEditor:
                  self.build_hull_button.config(state=tk.DISABLED)
 
     def activate_fill_tool(self):
-        """Активирует инструмент заливки полигонов."""
-        print("Активация инструмента: Заливка полигона")
+        """Активирует инструмент заливки полигона."""
+        # Don't use activate_draw_tool_common directly as fill is stateful
+        # self.activate_draw_tool_common(self.fill_context, click_handler=self.handle_fill_click)
+        print("Активация инструмента: Заливка")
 
-        # Сначала выходим из других режимов
+        # --- Deactivate other modes --- 
         if self.edit_mode:
-            self.deactivate_edit_tool()
-        if self.active_context:
-            self.active_context = None # Сбрасываем активный инструмент рисования
-        self.cancel_analysis_mode() # Выходим из режима анализа
-        self.canvas_view.unbind_all() # Убираем все биндинги
+             self.edit_mode = False
+             self.hide_all_handles()
+             if self.edit_button:
+                default_bg = self.root.cget('bg')
+                self.edit_button.config(relief=tk.RAISED, bg=default_bg)
+        self.cancel_analysis_mode()
+        self.active_context = None # Fill isn't a drawing context
+        self.last_active_draw_context = None # Don't remember fill as a drawing tool
+        self.hide_2d_transform_controls()
+        self.selected_item_index = None
+        self.selected_handle_index = None
 
-        self.fill_mode = "select_polygon" # Начальный шаг - выбор полигона
+        # --- Setup Fill Mode --- 
+        self.fill_mode = "select_polygon" # Start by selecting a polygon
         self.selected_polygon_for_fill_idx = None
-        # self.clear_fill_feedback() # Очистка старой заливки (если нужно)
 
-        # Привязываем клик для выбора полигона
+        # --- Bind only the necessary click handler --- 
+        self.canvas_view.unbind_all()
         self.canvas_view.bind_event("<Button-1>", self.handle_fill_click)
-        print(f"Режим заливки ({self.fill_context.get_strategy().name}). Кликните на полигон для заливки.")
+
+        print("Fill tool activated. Click a polygon to select it.")
+        # --- Hide build buttons --- 
+        if self.build_hull_button:
+            self.build_hull_button.pack_forget()
+        if self.build_vd_button:
+            self.build_vd_button.pack_forget()
 
     def toggle_edit_mode(self):
         """Переключает режим редактирования."""
@@ -402,6 +488,11 @@ class GraphicsEditor:
         elif context == self.second_order_context: tool_name = "Линии 2-го порядка"
         elif context == self.curve_context: tool_name = "Кривые"
         elif context == self.polygon_context: tool_name = "Выпуклая оболочка"
+        # --- Skip activation if context is fill --- 
+        elif context == self.fill_context: 
+            print("[INFO] activate_draw_tool_common called with fill_context, skipping activation.")
+            return 
+        # --------------------------------------
         print(f"Активация инструмента: {tool_name}")
 
         if self.edit_mode:
@@ -409,19 +500,25 @@ class GraphicsEditor:
              self.edit_mode = False
              self.hide_all_handles()
         self.cancel_analysis_mode() # Выходим из режима анализа при выборе инструмента рисования
+        self.cancel_fill_mode() # <- Ensure fill mode is cancelled when switching TO a drawing tool
 
         self.active_context = context
         self.last_active_draw_context = context # Remember this tool
         self.click_count = 0
+        # --- Reset click points only for non-polygon tools --- 
+        # Keep click points for polygon tool to allow adding more points
         if context != self.polygon_context:
              self.click_points = []
              self.canvas_view.canvas.delete("temp_polygon_point")
+        # ----------------------------------------------------
         self.selected_item_index = None
         self.selected_handle_index = None
 
-        # Скрываем кнопку "Построить оболочку", если это не инструмент полигонов
+        # Скрываем кнопки "Построить", если это не инструмент полигонов/V-D
         if context != self.polygon_context and self.build_hull_button and self.build_hull_button.winfo_ismapped():
              self.build_hull_button.pack_forget()
+        if context != self.voronoi_delaunay_context and self.build_vd_button and self.build_vd_button.winfo_ismapped():
+             self.build_vd_button.pack_forget()
 
         self.canvas_view.unbind_all()
 
@@ -659,7 +756,7 @@ class GraphicsEditor:
         """Запуск отладчика ЛИНИЙ."""
         if not self.debugger:
             print("Запуск отладчика Линий")
-            from model.debugger.lineDebugger import Debugger
+            # from model.debugger.lineDebugger import Debugger # Already imported at top
             self.debugger = Debugger(self.root)
             self.debugger.debug_window.protocol("WM_DELETE_WINDOW", self.on_debugger_close)
         else:
@@ -1022,6 +1119,10 @@ class GraphicsEditor:
         print("Закрытие главного окна. Очистка 3D режима (если активен).")
         if self.opengl_process and self.opengl_process.is_alive():
             self.stop_3d_mode()
+        # --- Close Debuggers on Main Window Close ---
+        self.on_debugger_close() # Close line debugger
+        self.on_vd_debugger_close() # Close V/D debugger
+        # -------------------------------------------
         self.root.destroy()
 
     # --- Apply Transformation Methods ---
@@ -1345,34 +1446,41 @@ class GraphicsEditor:
     # --- Методы для Заливки Полигонов ---
 
     def cancel_fill_mode(self):
-        """Выход из режима заливки."""
-        if not self.fill_mode: return
-        print("Выход из режима заливки.")
-        self.fill_mode = None
-        self.selected_polygon_for_fill_idx = None
-        # Не очищаем заливку self.clear_fill_feedback() здесь, чтобы она осталась видна
-        # Восстанавливаем биндинги?
-        # Пока не будем, т.к. обычно после заливки выбирают другой инструмент
-        self.canvas_view.unbind_all() # Просто убираем биндинги заливки
+        """Отменяет текущий режим заливки."""
+        if self.fill_mode:
+            print("Отмена режима заливки.")
+            self.fill_mode = None
+            self.selected_polygon_for_fill_idx = None
+            # self.clear_fill_feedback() # Не нужно, т.к. используем теги или image
+            # Возвращаем стандартное поведение клика (если оно было изменено)
+            # Возможно, лучше переключиться на инструмент по умолчанию или режим редактирования?
+            if self.last_active_draw_context:
+                 self.active_context = self.last_active_draw_context
+                 # Восстановить биндинги для этого контекста?
+                 # self.activate_draw_tool_common(...) # Пример
+            else:
+                # Если нет предыдущего контекста, возможно, активировать инструмент по умолчанию
+                self.activate_line_tool() # Например
 
     def clear_fill_feedback(self):
-        """Удаляет элементы заливки с холста."""
-        # TODO: Нужен более умный способ удаления старой заливки перед новой?
-        # Пока просто удаляем все элементы с тегом, начинающимся на "fill_"
-        fill_items = self.canvas_view.canvas.find_withtag("fill_")
-        print(f"[DEBUG] Clearing {len(fill_items)} fill items.")
-        for item_id in fill_items:
-              try: self.canvas_view.canvas.delete(item_id)
-              except tk.TclError: pass
-        self.fill_feedback_items = [] # Очищаем список (хотя он пока не используется)
+        """Удаляет элементы заливки с холста (старый метод, больше не нужен)."""
+        # Этот метод больше не нужен в таком виде, т.к. ET+AEL использует теги,
+        # а PIL-заливка управляется через current_fill_photo_image и canvas.fill_image_id
+        print("[INFO] clear_fill_feedback() больше не используется активно.")
+        pass
 
     def handle_fill_click(self, event):
         """Обрабатывает клик мыши в режиме заливки."""
-        if not self.fill_mode: return
+        if not self.fill_mode:
+            print("[DEBUG] handle_fill_click called but fill_mode is None. Ignoring.")
+            return
 
         x, y = self.canvas_view.get_coordinates(event)
         strategy = self.fill_context.get_strategy()
-        if not strategy: return
+        if not strategy:
+            print("Ошибка: Стратегия заливки не выбрана.")
+            self.cancel_fill_mode() # Exit if no strategy
+            return
 
         # Шаг 1: Выбор полигона
         if self.fill_mode == "select_polygon":
@@ -1380,50 +1488,306 @@ class GraphicsEditor:
             if clicked_polygon_idx is not None:
                 self.selected_polygon_for_fill_idx = clicked_polygon_idx
                 print(f"Выбран полигон {clicked_polygon_idx} для заливки.")
+                poly_item = self.drawn_items[self.selected_polygon_for_fill_idx]
 
-                # Если алгоритм не требует затравки, заливаем сразу
+                if poly_item.get("type") != "polygon":
+                     print(f"Ошибка: Выбранный элемент ({poly_item.get('type')}) не является полигоном.")
+                     self.selected_polygon_for_fill_idx = None
+                     return # Stay in select_polygon mode
+
+                # --- Clear previous fills --- 
+                canvas = self.canvas_view.canvas
+                if hasattr(canvas, 'fill_image_id'):
+                    try: canvas.delete(canvas.fill_image_id)
+                    except tk.TclError: pass
+                    del canvas.fill_image_id
+                self.current_fill_photo_image = None
+                old_fill_tag = poly_item.get("fill_tag")
+                if old_fill_tag:
+                    canvas.delete(old_fill_tag)
+                    del poly_item["fill_tag"]
+                # --------------------------
+
+                # --- Proceed based on strategy type --- 
                 if not strategy.requires_seed:
-                    poly_item = self.drawn_items[self.selected_polygon_for_fill_idx]
+                    # --- Execute No-Seed Fill (e.g., ET+AEL) --- 
+                    print(f"Запуск {strategy.name} для полигона {clicked_polygon_idx}...")
+                    try:
+                        rgb_tuple = canvas.winfo_rgb(self.fill_color)
+                        hex_fill_color = f'#{rgb_tuple[0]//256:02x}{rgb_tuple[1]//256:02x}{rgb_tuple[2]//256:02x}'
+                    except tk.TclError:
+                        hex_fill_color = '#000000'
                     poly_points = poly_item.get("points")
-                    # self.clear_fill_feedback() # Очищаем старую заливку?
-                    fill_tag = self.fill_context.execute_strategy(self.canvas_view.canvas, poly_points, self.fill_color)
+                    fill_tag = self.fill_context.execute_strategy(canvas, poly_points, hex_fill_color)
                     if fill_tag:
-                        # Можно добавить fill_tag в drawn_items или отдельный список для управления
-                        pass
-                    # Остаемся в режиме выбора полигона для следующей заливки
+                        poly_item["fill_tag"] = fill_tag
+                        print(f"{strategy.name} завершен. Тег заливки: {fill_tag}")
+                    else: print(f"{strategy.name} не выполнен.")
+                    # --- Reset for next selection --- 
                     self.selected_polygon_for_fill_idx = None
+                    # Stay in select_polygon mode
                     print("Кликните на следующий полигон или выберите другой инструмент.")
                 else:
-                    # Переходим в режим ожидания точки затравки
+                    # --- Transition to Seed Picking --- 
+                    if Image is None:
+                         print("Ошибка: Pillow не установлен. Невозможно выполнить заливку с затравкой.")
+                         self.selected_polygon_for_fill_idx = None
+                         return # Stay in select_polygon mode
+                    
+                    # Check if click was roughly within polygon bbox (optional, good UX)
+                    bbox = canvas.bbox(poly_item["tag"]) 
+                    if bbox and not (bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]):
+                         print("Клик вне ограничивающего прямоугольника полигона. Выберите полигон снова.")
+                         self.selected_polygon_for_fill_idx = None
+                         return # Stay in select_polygon mode
+                    
+                    # Transition state
                     self.fill_mode = "pick_seed"
                     print("Теперь кликните ВНУТРИ полигона для точки затравки.")
+                    # The SAME click handler (handle_fill_click) will process the next click
             else:
                 print("Полигон не найден в точке клика. Попробуйте еще раз.")
 
-        # Шаг 2: Выбор точки затравки
+        # Шаг 2: Выбор точки затравки (для Flood/Scanline)
         elif self.fill_mode == "pick_seed":
-            if self.selected_polygon_for_fill_idx is not None:
-                poly_item = self.drawn_items[self.selected_polygon_for_fill_idx]
-                poly_points = poly_item.get("points")
+            if self.selected_polygon_for_fill_idx is None:
+                 print("[WARN] pick_seed mode active but no polygon selected. Resetting.")
+                 self.fill_mode = "select_polygon"
+                 return
+            
+            if Image is None: # Should have been caught earlier, but double-check
+                 print("Ошибка: Pillow не установлен.")
+                 self.cancel_fill_mode()
+                 return
+            
+            print(f"Обработка клика ({x},{y}) как точки затравки для полигона {self.selected_polygon_for_fill_idx}")
+            poly_item = self.drawn_items[self.selected_polygon_for_fill_idx]
+            poly_points = poly_item.get("points")
+            canvas = self.canvas_view.canvas
 
-                # Проверяем, что точка затравки внутри выбранного полигона
-                # (Используем pa.point_in_polygon, чтобы убедиться)
-                status = pa.point_in_polygon((x, y), poly_points)
-                if status == "inside":
-                    print(f"Точка затравки: ({x},{y})")
-                    # self.clear_fill_feedback() # Очищаем старую заливку?
-                    fill_tag = self.fill_context.execute_strategy(self.canvas_view.canvas, poly_points, self.fill_color, seed_point=(x, y))
-                    if fill_tag:
-                        pass
-                    # Сбрасываем и возвращаемся к выбору полигона
-                    self.selected_polygon_for_fill_idx = None
-                    self.fill_mode = "select_polygon"
-                    print("Заливка выполнена (или предпринята попытка). Кликните на следующий полигон или выберите другой инструмент.")
-                else:
-                    print(f"Точка ({x},{y}) находится '{status}'. Кликните строго ВНУТРИ полигона для затравки.")
-                    # Остаемся в режиме pick_seed для этого полигона
+            # --- Check if click is INSIDE the polygon --- 
+            status = pa.point_in_polygon((x, y), poly_points)
+            if status != "inside":
+                print(f"Точка ({x},{y}) находится '{status}'. Кликните строго ВНУТРИ полигона для затравки.")
+                # DO NOT reset state here, allow user to try clicking again
+                return
+            # -------------------------------------------
+
+            # --- Prepare PIL Image --- 
+            canvas.update_idletasks()
+            width = canvas.winfo_width()
+            height = canvas.winfo_height()
+            if width <= 0 or height <= 0:
+                 print("Ошибка: Не удалось получить размеры холста.")
+                 self.cancel_fill_mode()
+                 return
+            try:
+                bg_color = canvas.cget('bg')
+                pil_bg_color = self._hex_to_rgb_pil(bg_color) if bg_color else (255, 255, 255)
+            except Exception:
+                pil_bg_color = (255, 255, 255)
+            pil_image = Image.new('RGB', (width, height), pil_bg_color)
+            draw = ImageDraw.Draw(pil_image)
+            boundary_color_pil = (0, 0, 0) # Assuming black boundary for PIL fill logic
+            pil_poly_points = [(int(px), int(py)) for px, py in poly_points]
+            if len(pil_poly_points) > 1:
+                draw.line(pil_poly_points + [pil_poly_points[0]], fill=boundary_color_pil, width=1)
+            del draw
+            # -------------------------
+
+            # --- Get Fill Color --- 
+            try:
+                rgb_tuple = canvas.winfo_rgb(self.fill_color)
+                hex_fill_color = f'#{rgb_tuple[0]//256:02x}{rgb_tuple[1]//256:02x}{rgb_tuple[2]//256:02x}'
+            except tk.TclError:
+                hex_fill_color = '#000000'
+            # ---------------------
+
+            # --- Execute Seed Fill --- 
+            print(f"Точка затравки: ({x},{y}). Запуск {strategy.name}...")
+            result_image = self.fill_context.execute_strategy(
+                canvas, poly_points, hex_fill_color,
+                seed_point=(int(x), int(y)),
+                image=pil_image
+            )
+            # -----------------------
+
+            # --- Display Result --- 
+            if isinstance(result_image, Image.Image):
+                print(f"{strategy.name} завершен. Отображение результата...")
+                self.current_fill_photo_image = ImageTk.PhotoImage(result_image)
+                canvas.fill_image_id = canvas.create_image(0, 0, anchor=tk.NW, image=self.current_fill_photo_image, tags="fill_image")
+                canvas.tag_raise(poly_item["tag"])
+                handles = canvas.find_withtag(f"handle_{poly_item['tag']}_")
+                for handle_id in handles:
+                     canvas.tag_raise(handle_id)
             else:
-                # Не должно произойти, но на всякий случай
-                self.cancel_fill_mode()
+                print(f"{strategy.name} не вернул изображение. Заливка не удалась.")
+            # --------------------
 
-    # ---------------------------------
+            # --- Reset state AFTER successful/attempted fill --- 
+            self.selected_polygon_for_fill_idx = None
+            self.fill_mode = "select_polygon" # Go back to selecting polygons
+            print("Заливка выполнена (или предпринята попытка). Кликните на следующий полигон или выберите другой инструмент.")
+            # --------------------------------------------------
+
+    def _hex_to_rgb_pil(self, hex_color):
+        """Преобразует HEX цвет Tkinter в RGB кортеж для PIL."""
+        try:
+            hex_color = hex_color.lstrip('#')
+            # Tkinter может возвращать '#RRGGBB' или по имени 'white'
+            # PIL ожидает (R, G, B)
+            if len(hex_color) == 6:
+                return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+            else:
+                 # Пытаемся получить RGB из стандартных имен цветов Tkinter
+                 # Это требует root окна для colormapfromstring
+                 rgb_tuple = self.root.winfo_rgb(hex_color)
+                 # winfo_rgb возвращает 16-битные значения, конвертируем в 8-битные
+                 return tuple(c // 256 for c in rgb_tuple)
+        except Exception as e:
+            print(f"Предупреждение: Не удалось преобразовать цвет '{hex_color}' в RGB: {e}. Используется белый.")
+            return (255, 255, 255) # По умолчанию белый
+
+    def choose_fill_color(self):
+        """Открывает диалог выбора цвета и сохраняет результат в self.fill_color."""
+        color_code = colorchooser.askcolor(title="Выберите цвет заливки", initialcolor=self.fill_color)
+        if color_code and color_code[1]: # color_code[1] это hex цвет
+            self.fill_color = color_code[1]
+            print(f"Выбран цвет заливки: {self.fill_color}")
+        else:
+            print("Выбор цвета отменен.")
+
+    # --- Voronoi/Delaunay Tool Activation ---
+    def activate_voronoi_delaunay_tool(self):
+        """Активирует инструмент ввода точек для диаграмм Вороного/триангуляции Делоне."""
+        self.activate_draw_tool_common(self.voronoi_delaunay_context, click_handler=self.capture_vd_point)
+        print(f"{self.voronoi_delaunay_context.get_current_strategy_name()} tool activated. Click to add points.")
+
+        # Очищаем предыдущие точки ввода V/D и результаты
+        self.clear_vd_input_points()
+        self.clear_vd_results()
+        self.vd_input_points = [] # Reset logical points array
+
+        # Показываем кнопку "Построить"
+        if self.build_vd_button:
+            # Pack before the clear button instead of the potentially hidden transform frame
+            self.build_vd_button.pack(pady=5, fill=tk.X, before=self.clear_button)
+            self.build_vd_button.config(state=tk.DISABLED) # Initially disabled
+
+        # Скрываем кнопку построения оболочки
+        if self.build_hull_button:
+            self.build_hull_button.pack_forget()
+    # ----------------------------------------
+
+    def capture_vd_point(self, event):
+        """Захватывает точку для Вороного/Делоне и отображает ее."""
+        x, y = event.x, event.y
+        self.vd_input_points.append((x, y))
+
+        # Draw a temporary visual representation of the point
+        r = self.TEMP_VD_POINT_RADIUS
+        point_id = self.canvas_view.canvas.create_oval(x - r, y - r, x + r, y + r, fill="red", outline="red", tags="vd_temp_point")
+        self.vd_temp_point_ids.append(point_id)
+
+        # Enable the build button if enough points are available
+        min_points = 3 if "Делоне" in self.voronoi_delaunay_context.get_current_strategy_name() else 2
+        if len(self.vd_input_points) >= min_points:
+            if self.build_vd_button:
+                self.build_vd_button.config(state=tk.NORMAL)
+
+    def build_voronoi_delaunay(self):
+        """Вычисляет и отрисовывает диаграмму Вороного или триангуляцию Делоне.
+           Запускает отладчик, если включен режим отладки V/D.
+        """
+        if not self.voronoi_delaunay_context or not self.voronoi_delaunay_context.strategy:
+            print("Ошибка: Не выбран алгоритм Вороного/Делоне.")
+            return
+
+        # Determine minimum points based on the actual strategy class
+        strategy_class = type(self.voronoi_delaunay_context.strategy)
+        is_delaunay = "DelaunayStrategy" in str(strategy_class)
+        min_points = 3 if is_delaunay else 2
+
+        if len(self.vd_input_points) < min_points:
+            print(f"Ошибка: Необходимо как минимум {min_points} точки для {self.voronoi_delaunay_context.get_current_strategy_name()}.")
+            return
+
+        # --- Check for Debug Mode --- 
+        if self.vd_debug_mode_active.get():
+            print(f"Запуск отладчика для {self.voronoi_delaunay_context.get_current_strategy_name()}...")
+            if self.vd_debugger and self.vd_debugger.debug_window.winfo_exists():
+                print("Отладчик V/D уже открыт. Закройте его сначала.")
+                return
+            # Pass context and points to the debugger
+            self.vd_debugger = VoronoiDelaunayDebugger(
+                self.root,
+                self.voronoi_delaunay_context,
+                list(self.vd_input_points) # Pass a copy
+            )
+            # Set the close protocol for the debugger window
+            if self.vd_debugger and self.vd_debugger.debug_window:
+                 self.vd_debugger.debug_window.protocol("WM_DELETE_WINDOW", self.on_vd_debugger_close)
+            # Don't draw on main canvas or clear results here, debugger handles visualization
+            if self.build_vd_button:
+                 self.build_vd_button.config(state=tk.DISABLED)
+            return # Exit after launching debugger
+        # --------------------------
+
+        # --- Normal Execution (No Debug Mode) ---
+        print(f"Building {self.voronoi_delaunay_context.get_current_strategy_name()} with {len(self.vd_input_points)} points.")
+
+        # Clear previous results from main canvas
+        self.clear_vd_results()
+
+        # Execute computation (using the normal compute method)
+        result = self.voronoi_delaunay_context.execute_compute(self.vd_input_points)
+
+        if result:
+            # Execute drawing on main canvas
+            self.vd_result_ids = self.voronoi_delaunay_context.execute_draw(
+                self.canvas_view.canvas,
+                self.vd_input_points,
+                result
+            )
+            print(f"Drawn {len(self.vd_result_ids)} elements on main canvas.")
+        else:
+            print("Computation failed or returned no result.")
+
+        # Keep input points visible, disable build button until more points added
+        if self.build_vd_button:
+            self.build_vd_button.config(state=tk.DISABLED)
+
+    def clear_vd_input_points(self):
+        """Удаляет временные точки ввода V/D с холста."""
+        for item_id in self.vd_temp_point_ids:
+            self.canvas_view.canvas.delete(item_id)
+        self.vd_temp_point_ids = []
+        # Keep self.vd_input_points logical array until a new tool is selected or clear is called
+
+    def clear_vd_results(self):
+        """Удаляет отрисованные элементы V/D с холста."""
+        for item_id in self.vd_result_ids:
+            self.canvas_view.canvas.delete(item_id)
+        self.vd_result_ids = []
+
+    # --- V/D Debugger Toggle and Cleanup ---
+    def toggle_vd_debug(self):
+        """Включает/выключает режим отладки V/D."""
+        if self.vd_debug_mode_active.get():
+            print("[Отладка V/D ВКЛЮЧЕНА (пошаговый режим)]")
+        else:
+            print("[Отладка V/D ВЫКЛЮЧЕНА]")
+            # Close debugger if it's open when mode is turned off
+            self.on_vd_debugger_close()
+
+    def on_vd_debugger_close(self):
+        """Callback or manual close for V/D debugger window."""
+        if self.vd_debugger and self.vd_debugger.debug_window.winfo_exists():
+            # Prevent recursive close if called from window protocol
+            self.vd_debugger.debug_window.protocol("WM_DELETE_WINDOW", lambda: None)
+            self.vd_debugger.on_close() # Use the debugger's close method
+        self.vd_debugger = None
+        # Optionally, uncheck the menu item if closed manually
+        # self.vd_debug_mode_active.set(False)
+    # -------------------------------------
